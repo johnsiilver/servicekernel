@@ -35,6 +35,8 @@ type Kernel[T any] struct {
 	// note: at some point this probably should become a trie tree to allow for more complex topic matching.
 	topics sync.ShardedMap[string, immutable.Slice[listener[T]]]
 
+	all sync.ShardedMap[string, listener[T]]
+
 	started bool
 }
 
@@ -109,6 +111,15 @@ func (k *Kernel[T]) Registry() sets.Set[string] {
 // Subscribe allows a module to subscribe to a topic or set of topics. The module will receive messages published to that topic.
 // This should not be called until the kernel has been started. Multiple modules can subscribe to the same topic.
 func (k *Kernel[T]) Subscribe(topic string, m Module[T], h Handler[T]) {
+	if topic == "" || m.Name() == "" || h == nil {
+		return
+	}
+
+	if topic == "*" {
+		k.all.Set(m.Name(), listener[T]{m: m, h: h})
+		return
+	}
+
 	old, ok := k.topics.Get(topic)
 	if !ok {
 		s := []listener[T]{{m: m, h: h}}
@@ -180,6 +191,15 @@ func (k *Kernel[T]) Publish(ctx context.Context, topic string, data T) error {
 	}
 
 	for _, l := range listeners.All() {
+		context.Pool(ctx).Submit(
+			ctx,
+			func() {
+				l.h(ctx, topic, data)
+			},
+		)
+	}
+
+	for _, l := range k.all.All() {
 		context.Pool(ctx).Submit(
 			ctx,
 			func() {

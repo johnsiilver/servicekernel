@@ -292,6 +292,7 @@ func TestSubscribe(t *testing.T) {
 
 	module1 := &fakeModule{name: "module1"}
 	module2 := &fakeModule{name: "module2"}
+	module3 := &fakeModule{name: "module3"}
 
 	// Register and start kernel
 	if err := k.Register(module1); err != nil {
@@ -299,6 +300,9 @@ func TestSubscribe(t *testing.T) {
 	}
 	if err := k.Register(module2); err != nil {
 		t.Fatalf("TestKernelSubscribe: failed to register module2: %v", err)
+	}
+	if err := k.Register(module3); err != nil {
+		t.Fatalf("TestKernelSubscribe: failed to register module3: %v", err)
 	}
 	if err := k.Start(ctx); err != nil {
 		t.Fatalf("TestKernelSubscribe: failed to start kernel: %v", err)
@@ -332,6 +336,25 @@ func TestSubscribe(t *testing.T) {
 	listeners, _ = k.topics.Get("topic1")
 	if listeners.Len() != 2 {
 		t.Errorf("TestKernelSubscribe: expected 2 listeners after second module subscription, got %d", listeners.Len())
+	}
+
+	// Test wildcard subscription
+	k.Subscribe("*", module3, handler)
+	
+	// Check wildcard subscription is in all map
+	if _, ok := k.all.Get("module3"); !ok {
+		t.Errorf("TestKernelSubscribe: module3 not found in all map after wildcard subscription")
+	}
+	
+	// Wildcard subscription should NOT appear in regular topics map
+	if _, ok := k.topics.Get("*"); ok {
+		t.Errorf("TestKernelSubscribe: wildcard (*) should not be in topics map")
+	}
+	
+	// Subscribe same module to wildcard again (should overwrite, not error)
+	k.Subscribe("*", module3, handler)
+	if _, ok := k.all.Get("module3"); !ok {
+		t.Errorf("TestKernelSubscribe: module3 wildcard subscription was removed on re-subscribe")
 	}
 }
 
@@ -408,11 +431,12 @@ func TestPublish(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		topic         string
-		subscribers   int
-		kernelStarted bool
-		wantErr       bool
+		name              string
+		topic             string
+		subscribers       int
+		wildcardSubscribers int
+		kernelStarted     bool
+		wantErr           bool
 	}{
 		{
 			name:          "Success: publish to topic with subscribers",
@@ -435,6 +459,14 @@ func TestPublish(t *testing.T) {
 			kernelStarted: false,
 			wantErr:       true,
 		},
+		{
+			name:                "Success: publish with wildcard subscribers",
+			topic:               "topic1",
+			subscribers:         1,
+			wildcardSubscribers: 2,
+			kernelStarted:       true,
+			wantErr:             false,
+		},
 	}
 
 	for _, test := range tests {
@@ -442,18 +474,32 @@ func TestPublish(t *testing.T) {
 		k := &Kernel[string]{
 			moduleNames: sets.Set[string]{},
 			topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
+			all:         sync.ShardedMap[string, listener[string]]{},
 		}
 
+		var mu sync.Mutex
+		receivedCount := 0
 		handler := func(ctx context.Context, topic string, data string) {
-			// Handler for testing
+			mu.Lock()
+			defer mu.Unlock()
+			receivedCount++
 		}
 
-		// Register modules
+		// Register modules for specific topic subscribers
 		modules := make([]*fakeModule, test.subscribers)
 		for i := 0; i < test.subscribers; i++ {
 			modules[i] = &fakeModule{name: string(rune('a' + i))}
 			if err := k.Register(modules[i]); err != nil {
 				t.Fatalf("TestKernelPublish(%s): failed to register module: %v", test.name, err)
+			}
+		}
+		
+		// Register modules for wildcard subscribers
+		wildcardModules := make([]*fakeModule, test.wildcardSubscribers)
+		for i := 0; i < test.wildcardSubscribers; i++ {
+			wildcardModules[i] = &fakeModule{name: "wildcard" + string(rune('a' + i))}
+			if err := k.Register(wildcardModules[i]); err != nil {
+				t.Fatalf("TestKernelPublish(%s): failed to register wildcard module: %v", test.name, err)
 			}
 		}
 
@@ -466,6 +512,10 @@ func TestPublish(t *testing.T) {
 			for i := 0; i < test.subscribers; i++ {
 				k.Subscribe(test.topic, modules[i], handler)
 			}
+			// Subscribe wildcard listeners
+			for i := 0; i < test.wildcardSubscribers; i++ {
+				k.Subscribe("*", wildcardModules[i], handler)
+			}
 		}
 
 		err := k.Publish(ctx, test.topic, "test data")
@@ -473,19 +523,25 @@ func TestPublish(t *testing.T) {
 		switch {
 		case err == nil && test.wantErr:
 			t.Errorf("TestKernelPublish(%s): got err == nil, want err != nil", test.name)
-			return
+			continue
 		case err != nil && !test.wantErr:
 			t.Errorf("TestKernelPublish(%s): got err == %s, want err == nil", test.name, err)
-			return
+			continue
 		case err != nil:
-			return
+			continue
 		}
 
 		// Give handlers time to execute (they run in goroutines)
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 
-		// We can't easily verify handler call count due to concurrent execution
-		// but we've verified no errors occurred
+		// Verify all subscribers received the message
+		mu.Lock()
+		expectedCount := test.subscribers + test.wildcardSubscribers
+		if receivedCount != expectedCount {
+			t.Errorf("TestKernelPublish(%s): received %d messages, expected %d (subscribers: %d, wildcard: %d)", 
+				test.name, receivedCount, expectedCount, test.subscribers, test.wildcardSubscribers)
+		}
+		mu.Unlock()
 	}
 }
 
