@@ -8,6 +8,18 @@ import (
 // Handler is a function type that handles messages published to a topic.
 type Handler[T any] func(ctx context.Context, topic string, data T)
 
+// Interceptor is a function type that can intercept messages as they are published to a topic
+// before they reach the handlers. If cont is false, the message will not be published and will
+// not go to any other Interceptors. However, Publish will not return an error. If err is not nil,
+// the same thing will happen, but Publish will return an error.
+// If a message needs a response, the Interceptor is responsible for that.
+// Be careful with Interceptors, as they are executed in order and unlike messages sent to module handlers,
+// this is executed in a single goroutine. Interceptors with long-running operations can muck up performance.
+// Interceptors can use the * topic, which will intercept all messages. This should only be done if the Interceptor
+// needs to manipulate all messages or deny messages from being published. Otherwise, it is better to have a module
+// that listens on all topics.
+type Interceptor[T any] func(ctx context.Context, topic string, symbols Symbols[T], data T) (cont bool, err error)
+
 // Symbols provide an interface for modules to interact within the kernel.
 // The Symbols interface can be extended at any time. If implementing a fake Symbols for testing, embed
 // the Symbols in your struct and implement the methods you need. If not you can be broken by future changes as
