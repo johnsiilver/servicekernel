@@ -314,7 +314,7 @@ func (k *Kernel[T]) topicsEqual(a, b immutable.Slice[listener[T]]) bool {
 	return false
 }
 
-var topicRE = regexp.MustCompile(`^[A-Za-z0-9/_-]+$`)
+var topicRE = regexp.MustCompile(`^[A-Za-z0-9/_.-]+$`)
 
 func topicValid(topic string) bool {
 	if topic == "*" {
