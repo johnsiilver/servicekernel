@@ -33,7 +33,8 @@ type Kernel[T any] struct {
 	modules     []Module[T]
 
 	// note: at some point this probably should become a trie tree to allow for more complex topic matching.
-	topics sync.ShardedMap[string, immutable.Slice[listener[T]]]
+	topics          sync.ShardedMap[string, immutable.Slice[listener[T]]]
+	topicsEqualOnce sync.Once
 
 	all sync.ShardedMap[string, listener[T]]
 
@@ -51,18 +52,7 @@ func (k *Kernel[T]) Start(ctx context.Context) error {
 		return fmt.Errorf("kernel has already started")
 	}
 
-	k.topics.IsEqual = func(a, b immutable.Slice[listener[T]]) bool {
-		if a.Len() != b.Len() {
-			return false
-		}
-		if a.Len() == 0 {
-			return true
-		}
-		if &unsafe.Slice(a)[0] == &unsafe.Slice(b)[0] {
-			return true
-		}
-		return false
-	}
+	k.topicsEqualOnce.Do(k.setupTopics)
 
 	k.started = true
 
@@ -87,6 +77,7 @@ func (k *Kernel[T]) Register(m Module[T]) error {
 	if k.started {
 		return fmt.Errorf("kernel has already started, cannot register new modules")
 	}
+	k.topicsEqualOnce.Do(k.setupTopics)
 
 	if m == nil {
 		return fmt.Errorf("module cannot be nil")
@@ -114,6 +105,7 @@ func (k *Kernel[T]) Subscribe(topic string, m Module[T], h Handler[T]) {
 	if topic == "" || m.Name() == "" || h == nil {
 		return
 	}
+	k.topicsEqualOnce.Do(k.setupTopics)
 
 	if topic == "*" {
 		k.all.Set(m.Name(), listener[T]{m: m, h: h})
@@ -184,6 +176,7 @@ func (k *Kernel[T]) Publish(ctx context.Context, topic string, data T) error {
 	if !k.started {
 		return errors.New("kernel has not started, cannot publish messages")
 	}
+	k.topicsEqualOnce.Do(k.setupTopics)
 
 	listeners, ok := k.topics.Get(topic)
 	if !ok || listeners.Len() == 0 {
@@ -208,4 +201,24 @@ func (k *Kernel[T]) Publish(ctx context.Context, topic string, data T) error {
 		)
 	}
 	return nil
+}
+
+// setupTopics initializes the topics map with a custom equality function.
+// This is necessary to ensure that we can compare slices of listeners correctly.
+func (k *Kernel[T]) setupTopics() {
+	k.topics.IsEqual = k.topicsEqual
+}
+
+// topicsEqual checks if two slices of listeners are equal. This is used to determine if a topic has changed.
+func (k *Kernel[T]) topicsEqual(a, b immutable.Slice[listener[T]]) bool {
+	if a.Len() != b.Len() {
+		return false
+	}
+	if a.Len() == 0 {
+		return true
+	}
+	if &unsafe.Slice(a)[0] == &unsafe.Slice(b)[0] {
+		return true
+	}
+	return false
 }
