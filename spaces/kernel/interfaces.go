@@ -18,13 +18,13 @@ type Handler[T any] func(ctx context.Context, topic string, data T)
 // Interceptors can use the * topic, which will intercept all messages. This should only be done if the Interceptor
 // needs to manipulate all messages or deny messages from being published. Otherwise, it is better to have a module
 // that listens on all topics.
-type Interceptor[T any] func(ctx context.Context, topic string, symbols Symbols[T], data T) (cont bool, err error)
+type Interceptor[T any] func(ctx context.Context, topic string, api API[T], data T) (cont bool, err error)
 
-// Symbols provide an interface for modules to interact within the kernel.
-// The Symbols interface can be extended at any time. If implementing a fake Symbols for testing, embed
-// the Symbols in your struct and implement the methods you need. If not you can be broken by future changes as
+// API provide an interface for modules to interact within the kernel.
+// The API interface can be extended at any time. If implementing a fake API for testing, embed
+// the API in your struct and implement the methods you need. If not, you can be broken by future changes as
 // we will not do a Major version bump for additions to this interface, only for changes that break existing functionality.
-type Symbols[T any] interface {
+type API[T any] interface {
 	// Registry returns a set of all module names registered in the kernel. This allows a module on Start() to check if
 	// another module is registered in the kernel.
 	Registry() sets.Set[string]
@@ -44,7 +44,7 @@ type Module[T any] interface {
 	// Init initializes the module with the provided context and kernel. Startup order happens in the order of registration,
 	// so if a module Init relies on another module, it should be registered after that module. You should avoid
 	// module dependencies via Init as it can lead to circular dependencies.
-	Init(ctx context.Context, s Symbols[T]) error
+	Init(ctx context.Context, api API[T]) error
 	// Start starts the module. This cannot block and Start must honor context cancellation.
 	Start(ctx context.Context) error
 }

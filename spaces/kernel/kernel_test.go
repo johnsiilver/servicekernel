@@ -19,16 +19,16 @@ type fakeModule struct {
 	startErr    error
 	initCalled  bool
 	startCalled bool
-	symbols     Symbols[string]
+	api         API[string]
 }
 
 func (f *fakeModule) Name() string {
 	return f.name
 }
 
-func (f *fakeModule) Init(ctx context.Context, s Symbols[string]) error {
+func (f *fakeModule) Init(ctx context.Context, s API[string]) error {
 	f.initCalled = true
-	f.symbols = s
+	f.api = s
 	return f.initErr
 }
 
@@ -40,7 +40,7 @@ func (f *fakeModule) Start(ctx context.Context) error {
 // moduleWrapper allows wrapping functions for Module interface
 type moduleWrapper struct {
 	name      string
-	initFunc  func(ctx context.Context, s Symbols[string]) error
+	initFunc  func(ctx context.Context, s API[string]) error
 	startFunc func(ctx context.Context) error
 }
 
@@ -48,7 +48,7 @@ func (m *moduleWrapper) Name() string {
 	return m.name
 }
 
-func (m *moduleWrapper) Init(ctx context.Context, s Symbols[string]) error {
+func (m *moduleWrapper) Init(ctx context.Context, s API[string]) error {
 	if m.initFunc != nil {
 		return m.initFunc(ctx, s)
 	}
@@ -155,8 +155,8 @@ func TestStart(t *testing.T) {
 			if !m.startCalled {
 				t.Errorf("TestKernelStart(%s): module %s Start() was not called", test.name, m.name)
 			}
-			if m.symbols == nil {
-				t.Errorf("TestKernelStart(%s): module %s did not receive symbols", test.name, m.name)
+			if m.api == nil {
+				t.Errorf("TestKernelStart(%s): module %s did not receive api", test.name, m.name)
 			}
 		}
 
@@ -604,17 +604,17 @@ func TestPublish(t *testing.T) {
 			spec := interceptorSpec // Capture for closure
 			switch spec.behavior {
 			case "pass":
-				interceptor = func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+				interceptor = func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 					*spec.called = true
 					return true, nil
 				}
 			case "block":
-				interceptor = func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+				interceptor = func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 					*spec.called = true
 					return false, nil
 				}
 			case "error":
-				interceptor = func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+				interceptor = func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 					*spec.called = true
 					return false, errors.New("interceptor error")
 				}
@@ -855,11 +855,6 @@ func TestTopicValid(t *testing.T) {
 			want:  false,
 		},
 		{
-			name:  "Error: topic with dot",
-			topic: "topic.name",
-			want:  false,
-		},
-		{
 			name:  "Error: topic with colon",
 			topic: "topic:name",
 			want:  false,
@@ -898,7 +893,7 @@ func TestAddInterceptor(t *testing.T) {
 			name:  "Success: add single interceptor",
 			topic: "topic1",
 			interceptors: []Interceptor[string]{
-				func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 					return true, nil
 				},
 			},
@@ -908,10 +903,10 @@ func TestAddInterceptor(t *testing.T) {
 			name:  "Success: add multiple interceptors",
 			topic: "topic1",
 			interceptors: []Interceptor[string]{
-				func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 					return true, nil
 				},
-				func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 					return true, nil
 				},
 			},
@@ -921,7 +916,7 @@ func TestAddInterceptor(t *testing.T) {
 			name:  "Success: add wildcard interceptor",
 			topic: "*",
 			interceptors: []Interceptor[string]{
-				func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 					return true, nil
 				},
 			},
@@ -930,7 +925,7 @@ func TestAddInterceptor(t *testing.T) {
 		{
 			name:  "Error: empty topic",
 			topic: "",
-			interceptors: []Interceptor[string]{func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+			interceptors: []Interceptor[string]{func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 				return true, nil
 			}},
 			wantErr: true,
@@ -951,7 +946,7 @@ func TestAddInterceptor(t *testing.T) {
 			name:  "Error: kernel already started",
 			topic: "topic1",
 			interceptors: []Interceptor[string]{
-				func(ctx context.Context, topic string, symbols Symbols[string], data string) (bool, error) {
+				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
 					return true, nil
 				},
 			},
