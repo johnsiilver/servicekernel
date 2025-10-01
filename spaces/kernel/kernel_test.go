@@ -309,9 +309,7 @@ func TestSubscribe(t *testing.T) {
 		t.Fatalf("TestKernelSubscribe: failed to start kernel: %v", err)
 	}
 
-	handler := func(ctx context.Context, topic string, data string) {
-		// Handler implementation for testing
-	}
+	handler := func(ctx context.Context, topic string, data string) error { return nil }
 
 	// Subscribe module1 to topic
 	k.Subscribe("topic1", module1, handler)
@@ -385,7 +383,7 @@ func TestUnsubscribe(t *testing.T) {
 		t.Fatalf("TestKernelUnsubscribe: failed to start kernel: %v", err)
 	}
 
-	handler := func(ctx context.Context, topic string, data string) {}
+	handler := func(ctx context.Context, topic string, data string) error { return nil }
 
 	// Subscribe modules to topic
 	k.Subscribe("topic1", module1, handler)
@@ -475,109 +473,20 @@ func TestPublish(t *testing.T) {
 			expectHandlerCalled: true,
 			wantErr:             false,
 		},
-		{
-			name:          "Success: interceptor passes message through",
-			topic:         "topic1",
-			subscribers:   1,
-			kernelStarted: true,
-			interceptors: []struct {
-				behavior string
-				called   *bool
-			}{
-				{behavior: "pass", called: new(bool)},
-			},
-			expectHandlerCalled: true,
-			wantErr:             false,
-		},
-		{
-			name:          "Success: interceptor blocks message",
-			topic:         "topic1",
-			subscribers:   1,
-			kernelStarted: true,
-			interceptors: []struct {
-				behavior string
-				called   *bool
-			}{
-				{behavior: "block", called: new(bool)},
-			},
-			expectHandlerCalled: false,
-			wantErr:             false,
-		},
-		{
-			name:          "Error: interceptor returns error",
-			topic:         "topic1",
-			subscribers:   1,
-			kernelStarted: true,
-			interceptors: []struct {
-				behavior string
-				called   *bool
-			}{
-				{behavior: "error", called: new(bool)},
-			},
-			expectHandlerCalled: false,
-			wantErr:             true,
-		},
-		{
-			name:          "Success: multiple interceptors all pass",
-			topic:         "topic1",
-			subscribers:   1,
-			kernelStarted: true,
-			interceptors: []struct {
-				behavior string
-				called   *bool
-			}{
-				{behavior: "pass", called: new(bool)},
-				{behavior: "pass", called: new(bool)},
-				{behavior: "pass", called: new(bool)},
-			},
-			expectHandlerCalled: true,
-			wantErr:             false,
-		},
-		{
-			name:          "Success: second interceptor blocks",
-			topic:         "topic1",
-			subscribers:   1,
-			kernelStarted: true,
-			interceptors: []struct {
-				behavior string
-				called   *bool
-			}{
-				{behavior: "pass", called: new(bool)},
-				{behavior: "block", called: new(bool)},
-				{behavior: "pass", called: new(bool)}, // Should not be called
-			},
-			expectHandlerCalled: false,
-			wantErr:             false,
-		},
-		{
-			name:                "Success: wildcard subscriber with interceptor",
-			topic:               "topic1",
-			subscribers:         0,
-			wildcardSubscribers: 1,
-			kernelStarted:       true,
-			interceptors: []struct {
-				behavior string
-				called   *bool
-			}{
-				{behavior: "pass", called: new(bool)},
-			},
-			expectHandlerCalled: true,
-			wantErr:             false,
-		},
 	}
 
 	for _, test := range tests {
 		ctx := t.Context()
 		k := &Kernel[string]{
-			moduleNames:  sets.Set[string]{},
-			topics:       sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
-			all:          sync.ShardedMap[string, listener[string]]{},
-			interceptors: make(map[string][]Interceptor[string]),
+			moduleNames: sets.Set[string]{},
+			topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
+			all:         sync.ShardedMap[string, listener[string]]{},
 		}
 
 		receivedCount := atomic.Int64{}
-		handler := func(ctx context.Context, topic string, data string) {
+		handler := func(ctx context.Context, topic string, data string) error {
 			receivedCount.Add(1)
+			return nil
 		}
 
 		// Register modules for specific topic subscribers
@@ -595,32 +504,6 @@ func TestPublish(t *testing.T) {
 			wildcardModules[i] = &fakeModule{name: "wildcard" + string(rune('a'+i))}
 			if err := k.Register(wildcardModules[i]); err != nil {
 				t.Fatalf("TestKernelPublish(%s): failed to register wildcard module: %v", test.name, err)
-			}
-		}
-
-		// Add interceptors if specified
-		for _, interceptorSpec := range test.interceptors {
-			var interceptor Interceptor[string]
-			spec := interceptorSpec // Capture for closure
-			switch spec.behavior {
-			case "pass":
-				interceptor = func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-					*spec.called = true
-					return true, nil
-				}
-			case "block":
-				interceptor = func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-					*spec.called = true
-					return false, nil
-				}
-			case "error":
-				interceptor = func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-					*spec.called = true
-					return false, errors.New("interceptor error")
-				}
-			}
-			if err := k.AddInterceptor(test.topic, interceptor); err != nil {
-				t.Fatalf("TestKernelPublish(%s): failed to add interceptor: %v", test.name, err)
 			}
 		}
 
@@ -701,10 +584,11 @@ func TestPublishConcurrent(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedData []string
-	handler := func(ctx context.Context, topic string, data string) {
+	handler := func(ctx context.Context, topic string, data string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		receivedData = append(receivedData, data)
+		return nil
 	}
 
 	k.Subscribe("topic1", module, handler)
@@ -753,7 +637,7 @@ func TestSubscribeConcurrent(t *testing.T) {
 		t.Fatalf("TestKernelSubscribeConcurrent: failed to start kernel: %v", err)
 	}
 
-	handler := func(ctx context.Context, topic string, data string) {}
+	handler := func(ctx context.Context, topic string, data string) error { return nil }
 
 	// Subscribe concurrently
 	for i, module := range modules {
@@ -875,114 +759,6 @@ func TestTopicValid(t *testing.T) {
 		got := topicValid(test.topic)
 		if got != test.want {
 			t.Errorf("TestTopicValid(%s): got %v, want %v", test.name, got, test.want)
-		}
-	}
-}
-
-func TestAddInterceptor(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		topic         string
-		interceptors  []Interceptor[string]
-		kernelStarted bool
-		wantErr       bool
-	}{
-		{
-			name:  "Success: add single interceptor",
-			topic: "topic1",
-			interceptors: []Interceptor[string]{
-				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-					return true, nil
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:  "Success: add multiple interceptors",
-			topic: "topic1",
-			interceptors: []Interceptor[string]{
-				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-					return true, nil
-				},
-				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-					return true, nil
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:  "Success: add wildcard interceptor",
-			topic: "*",
-			interceptors: []Interceptor[string]{
-				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-					return true, nil
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name:  "Error: empty topic",
-			topic: "",
-			interceptors: []Interceptor[string]{func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-				return true, nil
-			}},
-			wantErr: true,
-		},
-		{
-			name:         "Error: no interceptors",
-			topic:        "topic1",
-			interceptors: []Interceptor[string]{},
-			wantErr:      true,
-		},
-		{
-			name:         "Error: nil interceptor",
-			topic:        "topic1",
-			interceptors: []Interceptor[string]{nil},
-			wantErr:      true,
-		},
-		{
-			name:  "Error: kernel already started",
-			topic: "topic1",
-			interceptors: []Interceptor[string]{
-				func(ctx context.Context, topic string, api API[string], data string) (bool, error) {
-					return true, nil
-				},
-			},
-			kernelStarted: true,
-			wantErr:       true,
-		},
-	}
-
-	for _, test := range tests {
-		k := &Kernel[string]{
-			interceptors: make(map[string][]Interceptor[string]),
-			started:      test.kernelStarted,
-		}
-
-		err := k.AddInterceptor(test.topic, test.interceptors...)
-
-		switch {
-		case err == nil && test.wantErr:
-			t.Errorf("TestAddInterceptor(%s): got err == nil, want err != nil", test.name)
-			continue
-		case err != nil && !test.wantErr:
-			t.Errorf("TestAddInterceptor(%s): got err == %s, want err == nil", test.name, err)
-			continue
-		case err != nil:
-			continue
-		}
-
-		// Verify interceptors were added
-		if !test.wantErr {
-			interceptors, ok := k.interceptors[test.topic]
-			if !ok {
-				t.Errorf("TestAddInterceptor(%s): interceptors not found for topic %s", test.name, test.topic)
-			}
-			if len(interceptors) != len(test.interceptors) {
-				t.Errorf("TestAddInterceptor(%s): got %d interceptors, want %d", test.name, len(interceptors), len(test.interceptors))
-			}
 		}
 	}
 }

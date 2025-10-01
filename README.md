@@ -10,7 +10,6 @@ ServiceKernel provides a framework for building services as a collection of inde
 
 - **Module System**: Build applications as a collection of independent, reusable modules
 - **Topic-Based Messaging**: Publish/subscribe pattern with direct topic matching and wildcard support (`*`)
-- **Message Interception**: Interceptors can process or filter messages before they reach subscribers
 - **Concurrent Message Handling**: Messages are distributed to handlers concurrently using goroutine pools
 - **Type-Safe**: Generic implementation ensures type safety for message passing
 - **Lifecycle Management**: Ordered initialization and startup of modules with proper context cancellation
@@ -68,15 +67,29 @@ Messages are the data passed between modules. The generic type parameter `T` def
 Handlers process messages delivered to subscribed topics:
 
 ```go
-type Handler[T any] func(ctx context.Context, topic string, data T)
+type Handler[T any] func(ctx context.Context, topic string, data T) error
 ```
 
-### Interceptors
+Note that while a Handler returns an error, this doesn't cause anything to happen. It is simply so that wrappers, as you will see below, can do work on behalf of multiple different module handlers.
 
-Interceptors can inspect, modify, or block messages before delivery:
+Like Go http.HandleFunc, you can use wrappers to do general things for module handlers:
 
 ```go
-type Interceptor[T any] func(ctx context.Context, topic string, api API[T], data T) (cont bool, err error)
+func MetricWrapper[T any](h servicekernel.Handler[T]) servicekernel.Handler[T] {
+  return func(ctx context.Context, topic string, data T) error {
+  	// This uses a custom Context package, so you won't find context.Meter() in the stdlib.
+    context.Meter(ctx).Int64Counter(topic).Add(ctx, 1)
+    context.Meter(ctx).Int64UpDownCounter(topic+"-current").Add(ctx, 1)
+    defer context.Meter(ctx).Int64UpDownCounter(topic+"-current").Add(ctx, -1)
+
+    err := h(ctx, topic, data)
+    if err != nil {
+        context.Meter(ctx).Int64Counter(topic+"-errors").Add(ctx, 1)
+        return err
+    }
+    context.Meter(ctx).Int64Counter(topic+"-success").Add(ctx, 1)
+  }
+}
 ```
 
 ## What should be in a module vs a package?
@@ -197,15 +210,15 @@ func (h *HealthModule) Start(ctx context.Context) error {
 	return nil
 }
 
-func (h *HealthModule) handleHealthCheck(ctx context.Context, topic string, msg Message) {
+func (h *HealthModule) handleHealthCheck(ctx context.Context, topic string, msg Message) error {
 	// Filter out messages we don't care about.
 	if msg.Type != ReadyMsg {
-		return
+		return nil
 	}
 
 	if err := msg.validate(ctx); err != nil {
 		log.Println(err)
-		return
+		return nil
 	}
 
 	select {
@@ -213,6 +226,7 @@ func (h *HealthModule) handleHealthCheck(ctx context.Context, topic string, msg 
 	case <-ctx.Done():
 		log.Println("context expired while waiting for health check")
 	}
+	return nil
 }
 
 func main() {
@@ -234,403 +248,13 @@ func main() {
 }
 ```
 
-### Real-World Example: Event Processing System
-
-Here's a more complex example showing an event processing system with multiple modules:
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-    "time"
-
-    "github.com/johnsiilver/servicekernel/spaces/kernel"
-)
-
-//go:generate stringer -type=MsgType
-type MsgType uint8
-
-const (
-    UnknownMsg MsgType = 0
-    EventMsg   MsgType = 1
-    MetricMsg  MsgType = 2
-    AlertMsg   MsgType = 3
-)
-
-// Message type with multiple message variants. This is a `fat struct` implementation that avoids heap allocations
-// and determines the message type via `Type`. However, you can use `any` instead of `Msg` as your generic type and
-// do a more traditional type assertion methodology.
-type Msg struct {
-    Type   MsgType
-    Sender string
-
-    Event  EventData
-    Metric MetricData
-    Alert  AlertData
-}
-
-func (m *Msg) Validate(ctx context.Context) error {
-    if m.Sender == "" {
-        return fmt.Errorf("message sender cannot be empty")
-    }
-
-    switch m.Type {
-    case EventMsg:
-        return m.Event.Validate(ctx)
-    case MetricMsg:
-        return m.Metric.Validate(ctx)
-    case AlertMsg:
-        return m.Alert.Validate(ctx)
-    default:
-        return fmt.Errorf("invalid Message.Type(%v)", m.Type)
-    }
-}
-
-type EventData struct {
-    ID      string
-    Level   string // "info", "warning", "critical"
-    Source  string
-    Message string
-    Time    time.Time
-}
-
-func (e *EventData) Validate(ctx context.Context) error {
-    if e.Source == "" {
-        return fmt.Errorf("event source cannot be empty")
-    }
-    if e.Level != "info" && e.Level != "warning" && e.Level != "critical" {
-        return fmt.Errorf("invalid event level: %s", e.Level)
-    }
-    return nil
-}
-
-type MetricData struct {
-    Name  string
-    Value float64
-    Tags  map[string]string
-}
-
-func (m *MetricData) Validate(ctx context.Context) error {
-    if m.Name == "" {
-        return fmt.Errorf("metric name cannot be empty")
-    }
-    return nil
-}
-
-type AlertData struct {
-    Severity string
-    Message  string
-    Source   string
-    Resp     chan<- bool // For acknowledgment
-}
-
-func (a *AlertData) Validate(ctx context.Context) error {
-    if a.Source == "" || a.Message == "" {
-        return fmt.Errorf("alert source and message cannot be empty")
-    }
-    return nil
-}
-
-const EventProcessorName = "/services/events/processor"
-const TopicAllEvents = "*"
-const TopicCriticalEvents = "/events/critical"
-const TopicAlerts = "/alerts/send"
-
-type EventProcessor struct {
-    api         kernel.API[Msg]
-    // This is inefficient, but fine for an example.
-    mu sync.Mutex
-    eventCount  map[string]int
-}
-
-func NewEventProcessor() *EventProcessor {
-    return &EventProcessor{
-        eventCount: make(map[string]int),
-    }
-}
-
-func (e *EventProcessor) Name() string {
-    return EventProcessorName
-}
-
-func (e *EventProcessor) Init(ctx context.Context, api kernel.API[Msg]) error {
-    e.api = api
-    // Subscribe to all events for logging
-    api.Subscribe(TopicAllEvents, e, e.handleAllEvents)
-    // Subscribe to critical events for alerting
-    api.Subscribe(TopicCriticalEvents, e, e.handleCriticalEvents)
-    return nil
-}
-
-func (e *EventProcessor) Start(ctx context.Context) error {
-    log.Printf("[%s] Started event processor", e.Name())
-    return nil
-}
-
-func (e *EventProcessor) handleAllEvents(ctx context.Context, topic string, msg Msg) {
-    // Log all events for audit purposes
-    if msg.Type == EventMsg {
-    	e.mu.Lock()
-     	e.eventCount[msg.Event.Level]++
-      e.mu.Unlock()
-      log.Printf("[%s] Event from %s: [%s] %s", e.Name(), msg.Event.Source, msg.Event.Level, msg.Event.Message)
-    }
-}
-
-func (e *EventProcessor) handleCriticalEvents(ctx context.Context, topic string, msg Msg) {
-    if msg.Type != EventMsg || msg.Event.Level != "critical" {
-        return
-    }
-
-    // Handle critical events by creating alerts
-    log.Printf("[%s] CRITICAL EVENT: %s - %s", e.Name(), msg.Event.Source, msg.Event.Message)
-
-    // Send alert to alert manager
-    e.api.Publish(ctx, TopicAlerts, Msg{
-        Type:   AlertMsg,
-        Sender: e.Name(),
-        Alert: AlertData{
-            Severity: "high",
-            Message:  fmt.Sprintf("Critical event: %s", msg.Event.Message),
-            Source:   msg.Event.Source,
-        },
-    })
-}
-
-// Metrics collector module
-const MetricsCollectorName = "/services/metrics/collector"
-const TopicMetricsReport = "/metrics/report"
-const TopicMetricsQuery = "/metrics/query"
-
-type MetricsCollector struct {
-    api     kernel.API[Msg]
-    mu sync.Mutex
-    metrics map[string][]float64
-}
-
-func NewMetricsCollector() *MetricsCollector {
-    return &MetricsCollector{
-        metrics: make(map[string][]float64),
-    }
-}
-
-func (m *MetricsCollector) Name() string {
-    return MetricsCollectorName
-}
-
-func (m *MetricsCollector) Init(ctx context.Context, api kernel.API[Msg]) error {
-    m.api = api
-    api.Subscribe(TopicMetricsReport, m, m.handleMetricReport)
-    return nil
-}
-
-func (m *MetricsCollector) Start(ctx context.Context) error {
-	// Start background aggregation
-	go m.aggregateMetrics(ctx)
-	log.Printf("[%s] Started metrics collector", m.Name())
-	return nil
-}
-
-func (m *MetricsCollector) handleMetricReport(ctx context.Context, topic string, msg Msg) {
-	if msg.Type != MetricMsg {
-	    return
-	}
-
-	if err := msg.Validate(ctx); err != nil {
-	    log.Printf("[%s] Invalid metric: %v", m.Name(), err)
-	    return
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	m.metrics[msg.Metric.Name] = append(m.metrics[msg.Metric.Name], msg.Metric.Value)
-
-	// Check thresholds and generate events if needed
-	if msg.Metric.Name == "error_rate" && msg.Metric.Value > 0.05 {
-	    m.api.Publish(ctx, TopicCriticalEvents, Msg{
-	        Type:   EventMsg,
-	        Sender: m.Name(),
-	        Event: EventData{
-	            Level:   "critical",
-	            Source:  "metrics",
-	            Message: fmt.Sprintf("Error rate exceeded threshold: %.2f%%", msg.Metric.Value*100),
-	            Time:    time.Now(),
-	        },
-	    })
-	}
-}
-
-func (m *MetricsCollector) aggregateMetrics(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-    select {
-    case <-ticker.C:
-    	mu.Lock()
-	    for name, values := range m.metrics {
-	        if len(values) > 0 {
-	            avg := 0.0
-	            for _, v := range values {
-	                avg += v
-	            }
-	            avg /= float64(len(values))
-	            log.Printf("[%s] Metric %s: avg=%.2f, count=%d",
-	                m.Name(), name, avg, len(values))
-	        }
-	    }
-	    // Clear metrics after aggregation
-	    m.metrics = make(map[string][]float64)
-	    mu.Unlock()
-    case <-ctx.Done():
-        return
-    }
-	}
-}
-
-// Alert manager module
-const AlertManagerName = "/services/alerts/manager"
-
-type AlertManager struct {
-	api    kernel.API[Msg]
-	alerts []AlertData
-}
-
-func NewAlertManager() *AlertManager {
-	return &AlertManager{
-	    alerts: make([]AlertData, 0),
-	}
-}
-
-func (a *AlertManager) Name() string {
-	return AlertManagerName
-}
-
-func (a *AlertManager) Init(ctx context.Context, api kernel.API[Msg]) error {
-	a.api = api
-	api.Subscribe(TopicAlerts, a, a.handleAlert)
-	return nil
-}
-
-func (a *AlertManager) Start(ctx context.Context) error {
-	log.Printf("[%s] Started alert manager", a.Name())
-	return nil
-}
-
-func (a *AlertManager) handleAlert(ctx context.Context, topic string, msg Msg) {
-	if msg.Type != AlertMsg {
-	    return
-	}
-
-	if err := msg.Validate(ctx); err != nil {
-	    log.Printf("[%s] Invalid alert: %v", a.Name(), err)
-	    return
-	}
-
-	a.alerts = append(a.alerts, msg.Alert)
-	log.Printf("[%s] ALERT [%s]: %s from %s",
-	    a.Name(), msg.Alert.Severity, msg.Alert.Message, msg.Alert.Source)
-
-	// Send acknowledgment if channel provided
-	if msg.Alert.Resp != nil {
-	    select {
-	    case msg.Alert.Resp <- true:
-	    case <-ctx.Done():
-	    }
-	}
-
-	// In production, this would send to external alerting systems
-}
-
-// Module registration
-func setupKernel(ctx context.Context) (*kernel.Kernel[Msg], error) {
-	k := &kernel.Kernel[Msg]{}
-
-	// Register modules
-	modules := []kernel.Module[Msg]{
-	    NewEventProcessor(),
-	    NewMetricsCollector(),
-	    NewAlertManager(),
-	}
-
-	for _, m := range modules {
-	    if err := k.Register(m); err != nil {
-	        return nil, fmt.Errorf("failed to register module %v: %w", m.Name(), err)
-	    }
-	}
-
-	// Add interceptors for cross-cutting concerns
-	if *debugFlag {
-	   	k.AddInterceptor("*", loggingInterceptor)
-	}
-	k.AddInterceptor("/events/*", eventValidationInterceptor)
-
-	return k, nil
-}
-
-// Logging interceptor
-func loggingInterceptor(ctx context.Context, topic string, api kernel.API[Msg], data Msg) (bool, error) {
-	log.Printf("Message on topic %s from %s (type: %s)", topic, data.Sender, data.Type)
-	return true, nil
-}
-
-// Event validation interceptor
-func eventValidationInterceptor(ctx context.Context, topic string, api kernel.API[Msg], data Msg) (bool, error) {
-	if data.Type == EventMsg {
-    if err := data.Event.Validate(ctx); err != nil {
-	    log.Printf("Invalid event on topic %s: %v", topic, err)
-	    return false, err
-    }
-	}
-	return true, nil
-}
-
-func main() {
-    ctx := context.Background()
-
-    k, err := setupKernel(ctx)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    if err := k.Start(ctx); err != nil {
-        log.Fatal(err)
-    }
-
-    // Simulate some events
-    k.Publish(ctx, TopicCriticalEvents, Msg{
-        Type:   EventMsg,
-        Sender: "main",
-        Event: EventData{
-            ID:      "evt-001",
-            Level:   "critical",
-            Source:  "database",
-            Message: "Connection pool exhausted",
-            Time:    time.Now(),
-        },
-    })
-
-    // Simulate metrics
-    k.Publish(ctx, TopicMetricsReport, Msg{
-        Type:   MetricMsg,
-        Sender: "main",
-        Metric: MetricData{
-            Name:  "error_rate",
-            Value: 0.08, // This will trigger an alert
-            Tags:  map[string]string{"service": "api", "endpoint": "/users"},
-        },
-    })
-}
-```
-
 ## Advanced Features
 
-### Message Interception
+### Handler Wrapping
 
-Add interceptors to implement cross-cutting concerns like logging, validation, and rate limiting:
+Handlers can be wrapped in other handlers. This can allow you to selectively apply certain function calls across similar or all module handlers. This allows for generic capture of counts, token buckets, circuit breakers, ...  This is similar to how the `net/http` package can wrap `HandleFunc`.
+
+Just remember generic handlers need to be fast or spin off goroutines because they are sitting on top of all messages moving through the kernel. You don't want something to block everything.
 
 ```go
 package main
@@ -639,31 +263,34 @@ import (
     "context"
     "fmt"
     "log"
-    "sync"
+    "sync/atomic"
     "time"
 
     "github.com/johnsiilver/servicekernel/spaces/kernel"
 )
 
-// Rate limiting interceptor with token bucket
-type RateLimiter struct {
+// rate limiting handler with token bucket
+type rateLimiter struct {
 	tokens     atomic.Int64
 	maxTokens  int64
 	refillRate time.Duration
 	lastRefill atomic.Int64 // Unix nano timestamp
+	h servicekernel.Handler
 }
 
-func NewRateLimiter(maxTokens int, refillRate time.Duration) *RateLimiter {
-	r := &RateLimiter{
+// NewRateLimiter makes a handler that rate limits topic calls.
+func NewRateLimiter(maxTokens int, refillRate time.Duration, h servicekernel.Handler) servicekernel.Handler {
+	r := &rateLimiter{
 		maxTokens:  int64(maxTokens),
 		refillRate: refillRate,
+		h: h,
 	}
 	r.tokens.Store(int64(maxTokens))
 	r.lastRefill.Store(time.Now().UnixNano())
-	return r
+	return r.handler
 }
 
-func (r *RateLimiter) Interceptor(ctx context.Context, topic string, api kernel.API[Msg], data Msg) (bool, error) {
+func (r *rateLimiter) handler(ctx context.Context, topic string, data Msg) error {
 	// Refill tokens
 	now := time.Now().UnixNano()
 	lastRefill := r.lastRefill.Load()
@@ -689,132 +316,22 @@ func (r *RateLimiter) Interceptor(ctx context.Context, topic string, api kernel.
 		current := r.tokens.Load()
 		if current <= 0 {
 			log.Printf("Rate limit exceeded for topic %s from %s", topic, data.Sender)
-			return false, fmt.Errorf("rate limit exceeded")
+			return fmt.Errorf("rate limit exceeded")
 		}
 		if r.tokens.CompareAndSwap(current, current-1) {
-			return true, nil
+			return r.h(ctx, topic, data)
 		}
 	}
 }
 
-// Audit logging interceptor
-func auditInterceptor(ctx context.Context, topic string, api kernel.API[Msg], data Msg) (bool, error) {
-	// Log with structured data for audit trail
-	log.Printf("AUDIT: timestamp=%s topic=%s sender=%s type=%s",
-		time.Now().Format(time.RFC3339), topic, data.Sender, data.Type)
-	return true, nil
-}
-
-// Security validation interceptor
-func securityInterceptor(ctx context.Context, topic string, api kernel.API[Msg], data Msg) (bool, error) {
-	// Check if sender is authorized for this topic
-	if topic == "/admin/*" && !isAdminModule(data.Sender) {
-		log.Printf("SECURITY: Unauthorized access to %s by %s", topic, data.Sender)
-		return false, fmt.Errorf("unauthorized access")
+// Audit logging handler.
+func NewAuditHandler(h servicekernel.Handler) servicekernel.Handler {
+	return func(ctx context.Context, topic string, data Msg) error {
+		// Log with structured data for audit trail
+		log.Printf("AUDIT: timestamp=%s topic=%s sender=%s type=%s",
+			time.Now().Format(time.RFC3339), topic, data.Sender, data.Type)
+		return h(ctx, topic, data)
 	}
-
-	// Validate message integrity
-	if err := data.Validate(ctx); err != nil {
-		log.Printf("SECURITY: Invalid message on %s: %v", topic, err)
-		return false, err
-	}
-
-	return true, nil
-}
-
-func isAdminModule(sender string) bool {
-	adminModules := map[string]bool{
-		"/services/admin":   true,
-		"/services/control": true,
-	}
-	return adminModules[sender]
-}
-
-// Circuit breaker interceptor
-type CircuitBreaker struct {
-    mu           sync.Mutex
-    failureCount int
-    maxFailures  int
-    state        string // "closed", "open", "half-open"
-    lastFailTime time.Time
-    timeout      time.Duration
-}
-
-func NewCircuitBreaker(maxFailures int, timeout time.Duration) *CircuitBreaker {
-    return &CircuitBreaker{
-        maxFailures: maxFailures,
-        state:       "closed",
-        timeout:     timeout,
-    }
-}
-
-func (cb *CircuitBreaker) Interceptor(ctx context.Context, topic string, api kernel.API[Msg], data Msg) (bool, error) {
-    cb.mu.Lock()
-    defer cb.mu.Unlock()
-
-    // Check circuit state
-    switch cb.state {
-    case "open":
-        if time.Since(cb.lastFailTime) > cb.timeout {
-            cb.state = "half-open"
-            cb.failureCount = 0
-            log.Printf("Circuit breaker: transitioning to half-open for topic %s", topic)
-        } else {
-            return false, fmt.Errorf("circuit breaker is open")
-        }
-    case "half-open":
-        // Allow one request through to test
-    case "closed":
-        // Normal operation
-    }
-
-    return true, nil
-}
-
-func (cb *CircuitBreaker) RecordSuccess() {
-    cb.mu.Lock()
-    defer cb.mu.Unlock()
-
-    if cb.state == "half-open" {
-        cb.state = "closed"
-        cb.failureCount = 0
-        log.Printf("Circuit breaker: closed")
-    }
-}
-
-func (cb *CircuitBreaker) RecordFailure() {
-    cb.mu.Lock()
-    defer cb.mu.Unlock()
-
-    cb.failureCount++
-    cb.lastFailTime = time.Now()
-
-    if cb.failureCount >= cb.maxFailures {
-        cb.state = "open"
-        log.Printf("Circuit breaker: opened after %d failures", cb.failureCount)
-    }
-}
-
-// Setup with multiple interceptors
-func setupWithInterceptors(ctx context.Context) (*kernel.Kernel[Msg], error) {
-    k := &kernel.Kernel[Msg]{}
-
-    // Create rate limiter
-    rateLimiter := NewRateLimiter(100, time.Second)
-
-    // Create circuit breaker
-    circuitBreaker := NewCircuitBreaker(5, 30*time.Second)
-
-    // Add interceptors in order of execution
-    // Global interceptors (apply to all messages)
-    k.AddInterceptor("*", auditInterceptor)
-    k.AddInterceptor("*", rateLimiter.Interceptor)
-
-    // Topic-specific interceptors
-    k.AddInterceptor("/admin/*", securityInterceptor)
-    k.AddInterceptor("/external/*", circuitBreaker.Interceptor)
-
-    return k, nil
 }
 ```
 
@@ -831,7 +348,6 @@ func setupWithInterceptors(ctx context.Context) (*kernel.Kernel[Msg], error) {
 
 3. **Error Handling**:
    - Return errors from Init() and Start() to fail fast
-   - Use interceptors for centralized error handling for common things like message validation
    - Include error channels in messages for async error reporting
 
 4. **Context Usage**:
@@ -847,7 +363,6 @@ func setupWithInterceptors(ctx context.Context) (*kernel.Kernel[Msg], error) {
 
 - Messages to handlers are dispatched concurrently using goroutine pools
 - Topics use sharded maps for concurrent access
-- Interceptors run sequentially and should be lightweight
 - Wildcard (`*`) subscribers receive all messages - use sparingly
 
 ## Dependencies
