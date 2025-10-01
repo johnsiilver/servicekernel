@@ -41,8 +41,6 @@ type Kernel[T any] struct {
 
 	all sync.ShardedMap[string, listener[T]]
 
-	interceptors map[string][]Interceptor[T]
-
 	started bool
 }
 
@@ -102,45 +100,6 @@ func (k *Kernel[T]) Register(m Module[T]) error {
 // This should not be called until the kernel has been started or inside a Moduel's Start method.
 func (k *Kernel[T]) Registry() sets.Set[string] {
 	return k.moduleNames.Union(sets.Set[string]{})
-}
-
-// AddInterceptor adds a set of interceptors for a specific topic. This allows for message interception before they are sent
-// to the subscribers. This is provided to allows common message processing logic for specific topics to be applied.
-// Note that interceptors for the special topic "*" will be applied to all messages and will run before any specific
-// topic interceptors.
-func (k *Kernel[T]) AddInterceptor(topic string, interceptors ...Interceptor[T]) error {
-	if topic == "" || len(interceptors) == 0 {
-		return fmt.Errorf("topic cannot be empty and interceptors cannot be empty")
-	}
-
-	if !topicValid(topic) {
-		panic(fmt.Sprintf("invalid topic %s, must not contain [],*,{},? \\", topic))
-	}
-
-	for _, i := range interceptors {
-		if i == nil {
-			return fmt.Errorf("interceptor cannot be nil")
-		}
-	}
-
-	k.mu.Lock()
-	defer k.mu.Unlock()
-
-	if k.started {
-		return fmt.Errorf("kernel has already started, cannot add interceptors")
-	}
-
-	if _, ok := k.interceptors[topic]; !ok {
-		k.interceptors[topic] = []Interceptor[T]{}
-	}
-
-	for _, interceptor := range interceptors {
-		if interceptor == nil {
-			return fmt.Errorf("interceptor cannot be nil")
-		}
-		k.interceptors[topic] = append(k.interceptors[topic], interceptor)
-	}
-	return nil
 }
 
 // Subscribe allows a module to subscribe to a topic or set of topics. The module will receive messages published to that topic.
@@ -247,16 +206,6 @@ func (k *Kernel[T]) Publish(ctx context.Context, topic string, data T) error {
 		return fmt.Errorf("no subscribers for topic %s", topic)
 	}
 
-	for _, interceptors := range [2][]Interceptor[T]{k.interceptors["*"], k.interceptors[topic]} {
-		cont, err := k.runInterceptors(ctx, topic, data, interceptors)
-		if err != nil {
-			return err
-		}
-		if !cont {
-			return nil
-		}
-	}
-
 	for _, l := range listeners.All() {
 		context.Pool(ctx).Submit(
 			ctx,
@@ -275,19 +224,6 @@ func (k *Kernel[T]) Publish(ctx context.Context, topic string, data T) error {
 		)
 	}
 	return nil
-}
-
-func (k *Kernel[T]) runInterceptors(ctx context.Context, topic string, data T, interceptors []Interceptor[T]) (cont bool, err error) {
-	for _, i := range interceptors {
-		cont, err := i(ctx, topic, k, data)
-		if err != nil {
-			return false, err
-		}
-		if !cont {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // setupTopics initializes the topics map with a custom equality function.
