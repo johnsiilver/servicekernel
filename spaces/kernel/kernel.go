@@ -183,8 +183,8 @@ func (k *Kernel[T]) Unsubscribe(topic string, m Module[T]) {
 	}
 }
 
-// Publish sends a message to all modules subscribed to the specified topic. It will return an error if the kernel has not started,
-// if there are no subscribers for the topic, or if an error occurs while running interceptors. If there are wildcard subscribers
+// Publish sends a message to all modules subscribed to the specified topic. It will return an error if the kernel has not started
+// or if there are no subscribers for the topic. If there are wildcard subscribers
 // but no topic specific subscribers, it will still send the message to those wildcard subscribers.
 func (k *Kernel[T]) Publish(ctx context.Context, topic string, data T) error {
 	if !k.started {
