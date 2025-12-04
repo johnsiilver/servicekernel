@@ -2,7 +2,7 @@ module github.com/johnsiilver/servicekernel
 
 go 1.24.5
 
-require github.com/gostdlib/base v0.0.0-20250813052742-79964ba11c6b
+require github.com/gostdlib/base v0.0.0-20251203205244-dc5008750774
 
 require (
 	github.com/Azure/retry v0.0.0-20250701224816-85c6a88f883d // indirect
