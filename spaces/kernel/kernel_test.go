@@ -121,8 +121,9 @@ func TestStart(t *testing.T) {
 	for _, test := range tests {
 
 		ctx := t.Context()
+		moduleNames := sets.Set[string]{}
 		k := &Kernel[string]{
-			moduleNames: sets.Set[string]{},
+			moduleNames: &moduleNames,
 			topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
 			started:     test.started,
 		}
@@ -213,8 +214,9 @@ func TestRegister(t *testing.T) {
 	}
 
 	for _, test := range tests {
+		moduleNames := sets.Set[string]{}
 		k := &Kernel[string]{
-			moduleNames: sets.Set[string]{},
+			moduleNames: &moduleNames,
 			topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
 		}
 
@@ -251,9 +253,9 @@ func TestRegister(t *testing.T) {
 
 func TestRegistry(t *testing.T) {
 	t.Parallel()
-
+	moduleNames := sets.Set[string]{}
 	k := &Kernel[string]{
-		moduleNames: sets.Set[string]{},
+		moduleNames: &moduleNames,
 		topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
 	}
 
@@ -361,8 +363,9 @@ func TestUnsubscribe(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
+	moduleNames := sets.Set[string]{}
 	k := &Kernel[string]{
-		moduleNames: sets.Set[string]{},
+		moduleNames: &moduleNames,
 		topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
 	}
 
@@ -477,8 +480,9 @@ func TestPublish(t *testing.T) {
 
 	for _, test := range tests {
 		ctx := t.Context()
+		moduleNames := sets.Set[string]{}
 		k := &Kernel[string]{
-			moduleNames: sets.Set[string]{},
+			moduleNames: &moduleNames,
 			topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
 			all:         sync.ShardedMap[string, listener[string]]{},
 		}
@@ -569,8 +573,9 @@ func TestPublishConcurrent(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
+	moduleNames := sets.Set[string]{}
 	k := &Kernel[string]{
-		moduleNames: sets.Set[string]{},
+		moduleNames: &moduleNames,
 		topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
 	}
 
@@ -618,8 +623,9 @@ func TestSubscribeConcurrent(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
+	moduleNames := sets.Set[string]{}
 	k := &Kernel[string]{
-		moduleNames: sets.Set[string]{},
+		moduleNames: &moduleNames,
 		topics:      sync.ShardedMap[string, immutable.Slice[listener[string]]]{},
 	}
 

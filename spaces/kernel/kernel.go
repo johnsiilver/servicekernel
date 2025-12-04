@@ -32,7 +32,7 @@ type listener[T any] struct {
 type Kernel[T any] struct {
 	mu sync.Mutex
 	// moduleNames is a set of module names to ensure uniqueness.
-	moduleNames sets.Set[string]
+	moduleNames *sets.Set[string]
 	modules     []Module[T]
 
 	// note: at some point this probably should become a trie tree to allow for more complex topic matching.
@@ -88,6 +88,9 @@ func (k *Kernel[T]) Register(m Module[T]) error {
 	if m.Name() == "" {
 		return fmt.Errorf("module name cannot be empty")
 	}
+	if k.moduleNames == nil {
+		k.moduleNames = &sets.Set[string]{}
+	}
 	if k.moduleNames.Contains(m.Name()) {
 		return fmt.Errorf("module with name %s already exists", m.Name())
 	}
@@ -99,7 +102,8 @@ func (k *Kernel[T]) Register(m Module[T]) error {
 // Registry will return a set of all registered modules.
 // This should not be called until the kernel has been started or inside a Moduel's Start method.
 func (k *Kernel[T]) Registry() sets.Set[string] {
-	return k.moduleNames.Union(sets.Set[string]{})
+	// Using a Union() to do a copy.
+	return k.moduleNames.Union(&sets.Set[string]{})
 }
 
 // Subscribe allows a module to subscribe to a topic or set of topics. The module will receive messages published to that topic.
