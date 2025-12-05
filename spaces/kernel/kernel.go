@@ -102,6 +102,9 @@ func (k *Kernel[T]) Register(m Module[T]) error {
 // Registry will return a set of all registered modules.
 // This should not be called until the kernel has been started or inside a Moduel's Start method.
 func (k *Kernel[T]) Registry() sets.Set[string] {
+	if k.moduleNames == nil {
+		return sets.Set[string]{}
+	}
 	// Using a Union() to do a copy.
 	return k.moduleNames.Union(&sets.Set[string]{})
 }
