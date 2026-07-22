@@ -10,9 +10,11 @@ ServiceKernel provides a framework for building services as a collection of inde
 
 - **Module System**: Build applications as a collection of independent, reusable modules
 - **Topic-Based Messaging**: Publish/subscribe pattern with direct topic matching and wildcard support (`*`)
-- **Concurrent Message Handling**: Messages are distributed to handlers concurrently using goroutine pools
+- **Concurrent Message Handling**: Messages fan out to subscribers concurrently, delivered in order per subscriber
 - **Type-Safe**: Generic implementation ensures type safety for message passing
 - **Lifecycle Management**: Ordered initialization and startup of modules with proper context cancellation
+
+Message routing is backed by [github.com/gostdlib/concurrency/broadcast/subscriber](https://pkg.go.dev/github.com/gostdlib/concurrency/broadcast/subscriber).
 
 ## Why
 
@@ -52,9 +54,9 @@ type Module[T any] interface {
 ### Topics
 
 Topics are string identifiers used for message routing. The kernel supports:
-- **Direct matching**: Exact topic string match (e.g., `/system/health`)
-- **Wildcard matching**: The special topic `*` receives all messages
-- **Pattern validation**: Topics must match `^[A-Za-z0-9/_.-]+$` (unless `*`)
+- **Direct matching**: Exact topic match (e.g., `/system/health`). A leading `/` is optional and is not part of a topic's identity, so `/system/health` and `system/health` are the same topic
+- **Wildcard matching**: The special topic `*` receives all messages. `*` is subscribe-only — publishing to `*` panics
+- **Pattern validation**: Topics must match `^[A-Za-z0-9/_.-]+$` (unless `*`), and may not end in `/` or contain an empty segment (`//`). An invalid topic panics
 
 Best practice is to use hierarchical paths like `/module/feature/event`.
 
@@ -70,7 +72,11 @@ Handlers process messages delivered to subscribed topics:
 type Handler[T any] func(ctx context.Context, topic string, data T) error
 ```
 
-Note that while a Handler returns an error, this doesn't cause anything to happen. It is simply so that wrappers, as you will see below, can do work on behalf of multiple different module handlers.
+A Handler that returns an error has that error logged by the kernel; it does not stop the subscription, which continues to receive later messages. The error return also lets wrappers, as you will see below, do work on behalf of multiple different module handlers.
+
+Handlers subscribed to the same topic are delivered to in the order messages were published (per subscriber). Publishing to a topic that no one is subscribed to is not an error; the message is simply dropped.
+
+The handler is invoked with the context passed to `Publish`, so a trace span, deadline, or request-scoped value on the publishing call flows through to the handler.
 
 Like Go http.HandleFunc, you can use wrappers to do general things for module handlers:
 
@@ -201,7 +207,9 @@ func (h *HealthModule) Name() string {
 func (h *HealthModule) Init(ctx context.Context, api kernel.API[Message]) error {
   h.api = api
   // Subscribe to health check requests
-  api.Subscribe(TopicHealthReadyReq, h, h.handleHealthCheck)
+  if err := api.Subscribe(TopicHealthReadyReq, h, h.handleHealthCheck); err != nil {
+    return err
+  }
   return nil
 }
 
@@ -235,11 +243,9 @@ func main() {
     // Create kernel
     k := &kernel.Kernel[Message]{}
 
-    // Register modules
+    // Register modules. Register returns nothing: everything it refuses is a wiring mistake and panics.
     health := &HealthModule{}
-    if err := k.Register(health); err != nil {
-        log.Fatal(err)
-    }
+    k.Register(health)
 
     // Start kernel
     if err := k.Start(ctx); err != nil {
@@ -344,7 +350,8 @@ func NewAuditHandler(h servicekernel.Handler) servicekernel.Handler {
 2. **Module Independence**: Modules should not directly call each other via functions
    - Use message passing for all inter-module communication
    - Inject external dependencies through constructor
-   - Should check on other relied on mondules during Start() via the Registry that the module exists
+   - Should check on other relied on modules during Start() via the Registry that the module exists:
+     `if _, ok := api.Registry().Get("other/module"); !ok { return fmt.Errorf(...) }`
 
 3. **Error Handling**:
    - Return errors from Init() and Start() to fail fast
@@ -361,17 +368,64 @@ func NewAuditHandler(h servicekernel.Handler) servicekernel.Handler {
 
 ## Performance Considerations
 
-- Messages to handlers are dispatched concurrently using goroutine pools
-- Topics use sharded maps for concurrent access
+- Message routing is handled by `github.com/gostdlib/concurrency/broadcast/subscriber`, which stores each value once per topic no matter how many subscribers it has
+- Each subscription runs its own delivery loop, so a slow subscriber does not hold up publishers, but its backlog can build memory
 - Wildcard (`*`) subscribers receive all messages - use sparingly
+
+## Lifecycle
+
+- `Register` must be called before `Start`. It returns nothing: a nil module, an empty or duplicate name, and registering after `Start` are all wiring mistakes and panic
+- `Subscribe` returns an error; the kernel must be started before subscribing (subscribing from a module's `Init`/`Start` is fine)
+- `Unsubscribe` is fire-and-forget: it cancels the subscription and returns immediately, so the module may still receive a message or two that was already in flight before the cancellation takes effect
+- `Unsubscribe` and `Stop` stop *future* deliveries but do not cancel a handler that is already running — the handler runs on its `Publish` context, so it ends when it returns or when that context is canceled (a handler that must not run forever must honor that context)
+- `Stop(ctx)` ends every subscription and closes the message bus; after `Stop`, `Publish` returns an error
+- A kernel is **single use**. Once it has stopped — via `Stop` or a failed `Start` — it cannot be restarted, and a new `Kernel` must be created. The underlying message bus cannot reopen once closed, so this is enforced rather than merely advised. `Subscribe` and `Publish` return an error on a dead kernel; `Start` and `Register` panic, since calling either on a finished kernel is a wiring mistake
+- **`Stop` is the only thing that ends a kernel.** Cancelling the context passed to `Start` does not: that context supplies values and a span to the modules, and honouring its cancellation is theirs to do. A kernel therefore outlives its `Start` context, and a caller that never calls `Stop` leaks its subscriptions' delivery loops
+
+## Errors
+
+Every error the kernel returns wraps one of a small set of sentinels, so callers match on identity rather
+than on message text:
+
+```go
+if errors.Is(err, kernel.ErrStoppedOrNotStarted) {
+  // The kernel is dead; build a new one.
+}
+```
+
+| Error | Condition |
+|---|---|
+| `ErrStoppedOrNotStarted` | A call needing a running kernel, made before `Start` or after the kernel stopped |
+| `ErrInvalidArg` | A missing or malformed argument |
+| `ErrModuleFailed` | A module returned an error from `Init` or `Start` |
+| `ErrBus` | The message bus or the background task manager refused an operation |
+
+Every one of these also matches `errors.ErrPermanent`, so a caller running a kernel call under
+`retry/exponential` stops rather than retrying something that can never succeed.
+
+Conditions a caller cannot recover from at all — starting a kernel twice, registering a duplicate module
+name, an invalid topic — panic rather than returning an error.
+
+If `Start` returns an error, treat that kernel as dead and build a new one. Some failures happen before the
+kernel has built anything and would technically leave it startable, but that is not a guarantee — do not
+rely on it.
+
+## Metrics
+
+The message bus records OTel metrics under a meter namespaced by the kernel's `Name` field, which defaults
+to `"kernel"`. Set `Name` before `Start` only if a process runs more than one kernel and their metrics need
+to be told apart; it must satisfy the same character rules as a topic except that a bare `*` is not a name,
+and `Start` rejects it with the reason if it does not.
+Writing `Name` concurrently with `Start` is a data race, not merely a change that gets ignored.
 
 ## Dependencies
 
-The kernel uses several libraries from the `github.com/gostdlib/base` package:
-- `context`: Enhanced context with goroutine pools
-- `concurrency/sync`: Thread-safe data structures
-- `values/immutable`: Immutable data types for safe concurrent access
-- `values/generics/sets`: Generic set implementation
+The kernel uses libraries from `github.com/gostdlib/base` and `github.com/gostdlib/concurrency`:
+- `base/context`: Enhanced context with goroutine pools and background tasks
+- `base/concurrency/sync`: Thread-safe data structures
+- `base/errors`: Error helpers and the `ErrPermanent` marker
+- `base/values/immutable`: Immutable `Map` returned by `Registry()`
+- `concurrency/broadcast/subscriber`: Topic/path based message broadcast
 
 ## License
 
