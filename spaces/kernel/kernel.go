@@ -292,9 +292,14 @@ func (k *Kernel[T]) Subscribe(topic string, m Module[T], h Handler[T]) error {
 	// task's context, so a span, deadline or request-scoped value on the Publish call reaches the handler.
 	err = context.Tasks(subCtx).Once(subCtx, "kernelSubscription", func(_ context.Context) error {
 		for env := range seq {
-			if err := h(env.ctx, env.topic, env.data); err != nil {
-				context.Log(env.ctx).Error("kernel subscription handler failed", "module", name, "topic", env.topic, "error", err)
-			}
+			context.Pool(k.baseCtx).Submit(
+				k.baseCtx,
+				func() {
+					if err := h(env.ctx, env.topic, env.data); err != nil {
+						context.Log(env.ctx).Error("kernel subscription handler failed", "module", name, "topic", env.topic, "error", err)
+					}
+				},
+			)
 		}
 		return nil
 	})

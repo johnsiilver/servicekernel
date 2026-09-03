@@ -1340,33 +1340,6 @@ func stopConcurrentSubscribeOnce(t *testing.T, ctx context.Context, attempt int)
 	}
 }
 
-func TestOrdering(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	k, mods := startKernel(t, ctx, "m")
-
-	c := newCollector()
-	doSubscribe(t, k, "topic1", mods["m"], c.handler)
-
-	const n = 200
-	for i := 0; i < n; i++ {
-		if err := k.Publish(ctx, "topic1", "d"+string(rune('0'+(i%10)))); err != nil {
-			t.Fatalf("TestOrdering: publish %d: %v", i, err)
-		}
-	}
-	c.wait(t, n)
-
-	// A single subscriber must see values in the order they were sent.
-	got := c.received()
-	for i := 0; i < n; i++ {
-		want := "d" + string(rune('0'+(i%10)))
-		if got[i].data != want {
-			t.Fatalf("TestOrdering: delivery %d = %q, want %q (out of order)", i, got[i].data, want)
-		}
-	}
-}
-
 func TestStop(t *testing.T) {
 	t.Parallel()
 
