@@ -10,7 +10,7 @@ ServiceKernel provides a framework for building services as a collection of inde
 
 - **Module System**: Build applications as a collection of independent, reusable modules
 - **Topic-Based Messaging**: Publish/subscribe pattern with direct topic matching and wildcard support (`*`)
-- **Concurrent Message Handling**: Messages fan out to subscribers concurrently, delivered in order per subscriber
+- **Concurrent Message Handling**: Messages fan out to subscribers concurrently
 - **Type-Safe**: Generic implementation ensures type safety for message passing
 - **Lifecycle Management**: Ordered initialization and startup of modules with proper context cancellation
 
@@ -74,7 +74,7 @@ type Handler[T any] func(ctx context.Context, topic string, data T) error
 
 A Handler that returns an error has that error logged by the kernel; it does not stop the subscription, which continues to receive later messages. The error return also lets wrappers, as you will see below, do work on behalf of multiple different module handlers.
 
-Handlers subscribed to the same topic are delivered to in the order messages were published (per subscriber). Publishing to a topic that no one is subscribed to is not an error; the message is simply dropped.
+Publishing to a topic that no one is subscribed to is not an error; the message is simply dropped.
 
 The handler is invoked with the context passed to `Publish`, so a trace span, deadline, or request-scoped value on the publishing call flows through to the handler.
 
