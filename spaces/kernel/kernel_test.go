@@ -1197,6 +1197,55 @@ func TestSubscribeConcurrent(t *testing.T) {
 // TestSubscribeLifecycle pins which lifecycle states accept a Subscribe. The stopped cases matter beyond the
 // error they return: a Subscribe that slips through on a stopped kernel registers a delivery loop that no
 // teardown will ever cancel, because teardown has already snapshotted and dropped k.subs.
+// TestDeliveryConcurrent proves that one subscription handles messages concurrently rather than one
+// at a time.
+//
+// This is the property that keeps a handler which blocks for a long time, such as one waiting on a
+// remote operation to finish, from holding up every later message for its subscription. Delivery
+// used to call the handler inline on the subscription's single goroutine, so a slow handler stalled
+// everything behind it.
+//
+// It is asserted by blocking every handler on entry and requiring all of them to arrive before any
+// is released. Under serial delivery only the first handler would ever run and the wait below would
+// time out. Two messages is the smallest number that demonstrates the property, and keeps the test
+// from depending on how many workers the pool happens to have.
+//
+// A handler that needs its messages one at a time must serialize them itself; the kernel no longer
+// does it for them.
+func TestDeliveryConcurrent(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	k, mods := startKernel(t, ctx, "m")
+
+	const want = 2
+
+	entered := make(chan struct{}, want)
+	release := make(chan struct{})
+	// Released unconditionally so that a failed assertion cannot leave handlers parked forever.
+	defer close(release)
+
+	doSubscribe(t, k, "topic1", mods["m"], func(ctx context.Context, topic, data string) error {
+		entered <- struct{}{}
+		<-release
+		return nil
+	})
+
+	for i := 0; i < want; i++ {
+		if err := k.Publish(ctx, "topic1", "d"); err != nil {
+			t.Fatalf("TestDeliveryConcurrent: publish %d: %v", i, err)
+		}
+	}
+
+	for got := 0; got < want; got++ {
+		select {
+		case <-entered:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("TestDeliveryConcurrent: got %d handlers in flight, want %d: delivery is serialized", got, want)
+		}
+	}
+}
+
 func TestSubscribeLifecycle(t *testing.T) {
 	t.Parallel()
 
